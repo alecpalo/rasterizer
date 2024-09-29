@@ -5,3 +5,7 @@ edition = "2021"
 
 [dependencies]
 minifb = "0.22"
+csv = "1"
+clap = "2.33"
+serde = { version = "1.0", features = ["derive"] }
+

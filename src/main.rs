@@ -1,17 +1,79 @@
-use std::env;
+use std::cmp;
+use std::error::Error;
+use std::fs::File;
+use std::path::Path;
 use std::vec;
 
 use minifb::{Key, Window, WindowOptions};
+use serde::Deserialize;
 
 const WIDTH: usize = 800; // Window width
 const HEIGHT: usize = 800; // Window height
 
-fn main() {
-    // args should be three points
-    let args: Vec<String> = env::args().collect();
-    let t: Triangle = get_triangle(&args);
+#[derive(Deserialize)]
+struct Csv {
+    x1: i64,
+    y1: i64,
+    x2: i64,
+    y2: i64,
+    x3: i64,
+    y3: i64,
+    color: u32,
+}
 
-    let mut window = Window::new(
+pub fn read_csv<P: AsRef<Path>>(filename: P) -> Result<Vec<Triangle>, Box<dyn Error>> {
+    let file = File::open(filename)?;
+    let mut reader = csv::Reader::from_reader(file);
+
+    let mut triangles: Vec<Triangle> = vec![];
+
+    let iter = reader.deserialize();
+
+    for result in iter {
+        let record: Csv = result?;
+        println!(
+            "{} {} {} {} {} {} {} \n",
+            record.x1, record.y1, record.x2, record.y2, record.x3, record.y3, record.color
+        );
+
+        let p0 = Point {
+            x: record.x1,
+            y: record.y1,
+        };
+
+        let p1 = Point {
+            x: record.x2,
+            y: record.y2,
+        };
+
+        let p2 = Point {
+            x: record.x3,
+            y: record.y3,
+        };
+
+        if !edge_function(&p0, &p1, &p2) {
+            triangles.push(Triangle {
+                c: record.color,
+                v0: p0,
+                v1: p2,
+                v2: p1,
+            });
+        } else {
+            triangles.push(Triangle {
+                c: record.color,
+                v0: p0,
+                v1: p1,
+                v2: p2,
+            });
+        }
+    }
+
+    Ok(triangles)
+}
+fn main() {
+    let ts = read_csv("triangles.csv");
+
+    let window = Window::new(
         "Triangle Rasterization",
         WIDTH,
         HEIGHT,
@@ -21,12 +83,17 @@ fn main() {
         panic!("{}", e);
     });
 
+    let mut g = Graphics { window: window };
+
     let mut buffer: Vec<u32> = vec![0; WIDTH * HEIGHT];
 
-    // Main loop: this keeps the window open until ESC is pressed
-    while window.is_open() && !window.is_key_down(Key::Escape) {
-        draw_triangle(&mut buffer, &t);
-        window.update_with_buffer(&buffer, WIDTH, HEIGHT).unwrap();
+    let triangles = ts.unwrap();
+
+    while g.window.is_open() && !g.window.is_key_down(Key::Escape) {
+        for t in &triangles {
+            g.draw_triangle(&mut buffer, t);
+        }
+        g.window.update_with_buffer(&buffer, WIDTH, HEIGHT).unwrap();
     }
 }
 
@@ -46,77 +113,93 @@ fn get_triangle(args: &Vec<String>) -> Triangle {
         y: args[6].parse().unwrap(),
     };
 
-    let t: Triangle = Triangle {
+    if !edge_function(&p1, &p2, &p3) {
+        return Triangle {
+            c: 0xFFFFFF,
+            v0: p1,
+            v1: p3,
+            v2: p2,
+        };
+    }
+
+    return Triangle {
         c: 0xFFFFFF,
         v0: p1,
         v1: p2,
         v2: p3,
     };
-    return t;
 }
 
-fn draw_triangle(buffer: &mut Vec<u32>, t: &Triangle) {
-    draw_line(buffer, &t.v0, &t.v1, t.c);
-    draw_line(buffer, &t.v1, &t.v2, t.c);
-    draw_line(buffer, &t.v2, &t.v0, t.c);
+struct Graphics {
+    window: Window,
+}
 
-    for y in 0..HEIGHT {
-        for x in 0..WIDTH {
-            let p = Point {
-                x: x as i64,
-                y: y as i64,
-            };
+impl Graphics {
+    fn draw_triangle(&mut self, buffer: &mut Vec<u32>, t: &Triangle) {
+        Self::draw_line(buffer, &t.v0, &t.v1, t.c);
+        Self::draw_line(buffer, &t.v1, &t.v2, t.c);
+        Self::draw_line(buffer, &t.v2, &t.v0, t.c);
 
-            let mut inside = true;
-            inside &= edge_function(&t.v0, &t.v1, &p);
-            inside &= edge_function(&t.v1, &t.v2, &p);
-            inside &= edge_function(&t.v2, &t.v0, &p);
+        let y_min = cmp::min(cmp::min(t.v0.y, t.v1.y), t.v2.y);
+        let y_max = cmp::max(cmp::max(t.v0.y, t.v1.y), t.v2.y);
+        let x_min = cmp::min(cmp::min(t.v0.x, t.v1.x), t.v2.x);
+        let x_max = cmp::max(cmp::max(t.v0.x, t.v1.x), t.v2.x);
 
-            print!("{}\n", inside);
+        for y in y_min..y_max {
+            for x in x_min..x_max {
+                let p = Point { x: x, y: y };
 
-            if inside == true {
-                set_point(buffer, &p, 0xFFADD8E6);
+                let mut inside = true;
+                inside &= edge_function(&t.v0, &t.v1, &p);
+                inside &= edge_function(&t.v1, &t.v2, &p);
+                inside &= edge_function(&t.v2, &t.v0, &p);
+
+                print!("{}\n", inside);
+
+                if inside == true {
+                    Self::set_point(buffer, &p, t.c);
+                }
             }
         }
     }
-}
 
-fn draw_line(buffer: &mut Vec<u32>, p0: &Point, p1: &Point, c: u32) {
-    let (mut x0, mut y0) = (p0.x as i64, p0.y as i64);
-    let (x1, y1) = (p1.x as i64, p1.y as i64);
+    fn draw_line(buffer: &mut Vec<u32>, p0: &Point, p1: &Point, c: u32) {
+        let (mut x0, mut y0) = (p0.x as i64, p0.y as i64);
+        let (x1, y1) = (p1.x as i64, p1.y as i64);
 
-    let dx = (x1 - x0).abs();
-    let dy = -(y1 - y0).abs();
-    let sx = if x0 < x1 { 1 } else { -1 };
-    let sy = if y0 < y1 { 1 } else { -1 };
-    let mut err = dx + dy;
+        let dx = (x1 - x0).abs();
+        let dy = -(y1 - y0).abs();
+        let sx = if x0 < x1 { 1 } else { -1 };
+        let sy = if y0 < y1 { 1 } else { -1 };
+        let mut err = dx + dy;
 
-    loop {
-        set_point(buffer, &Point { x: x0, y: y0 }, c); // Draw the current point
+        loop {
+            Self::set_point(buffer, &Point { x: x0, y: y0 }, c); // Draw the current point
 
-        if x0 == x1 && y0 == y1 {
-            break;
-        } // Break when the end point is reached
+            if x0 == x1 && y0 == y1 {
+                break;
+            } // Break when the end point is reached
 
-        let e2 = 2 * err;
-        if e2 >= dy {
-            err += dy;
-            x0 += sx;
-        }
-        if e2 <= dx {
-            err += dx;
-            y0 += sy;
+            let e2 = 2 * err;
+            if e2 >= dy {
+                err += dy;
+                x0 += sx;
+            }
+            if e2 <= dx {
+                err += dx;
+                y0 += sy;
+            }
         }
     }
-}
 
-fn get_index(x: i64, y: i64) -> usize {
-    let index = (WIDTH as i64 * y) + x;
-    return index as usize;
-}
+    fn get_index(x: i64, y: i64) -> usize {
+        let index = (WIDTH as i64 * y) + x;
+        return index as usize;
+    }
 
-fn set_point(buffer: &mut Vec<u32>, p: &Point, c: u32) {
-    buffer[get_index(p.x, p.y)] = c;
+    fn set_point(buffer: &mut Vec<u32>, p: &Point, c: u32) {
+        buffer[Self::get_index(p.x, p.y)] = c;
+    }
 }
 
 struct Point {
@@ -124,7 +207,7 @@ struct Point {
     y: i64,
 }
 
-struct Triangle {
+pub struct Triangle {
     c: u32,
     v0: Point,
     v1: Point,
